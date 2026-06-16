@@ -31,15 +31,34 @@ class DownloadWorker(QThread):
         self.row = row
         self.url = url
         self.folder_path = folder_path
+        self.is_paused = False 
+        self.process = None # <-- Initialize the variable safely
 
     def run(self):
         success, message = download_file(
             self.url, 
             self.folder_path, 
-            progress_callback=lambda msg: self.progress_signal.emit(self.row, msg)
+            progress_callback=self.safe_progress_emit,
+            process_callback=self.set_process
         )
-        self.finished_signal.emit(self.row, success, message)
+        
+        if not self.is_paused:
+            self.finished_signal.emit(self.row, success, message)
 
+    def safe_progress_emit(self, msg):
+        """Only emit progress to the UI if we haven't hit the pause button."""
+        if not self.is_paused:
+            self.progress_signal.emit(self.row, msg)
+
+    def set_process(self, proc):
+        """Callback to receive the aria2c process from back.py"""
+        self.process = proc
+
+    def stop(self):
+        """Forcefully kills the aria2c process to pause it."""
+        self.is_paused = True 
+        if self.process:
+            self.process.kill()
 
 class DownloadDialog(QDialog):
     download_requested = Signal(str, str) 
@@ -128,6 +147,9 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.cellDoubleClicked.connect(self.open_download_directory)
 
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
+
         layout = QVBoxLayout(central_widget)
         layout.addLayout(button_layout)
         layout.addWidget(self.table)
@@ -136,7 +158,7 @@ class MainWindow(QMainWindow):
         self.remove_item_btn.clicked.connect(self.remove_selected_item)
         
         self.downloader_dialog = None
-        self.active_workers = []
+        self.active_workers = {}
 
         self.last_save_path = ""
 
@@ -299,7 +321,7 @@ class MainWindow(QMainWindow):
         worker.progress_signal.connect(self.on_progress_update)
         worker.finished_signal.connect(self.on_download_finished)
         
-        self.active_workers.append(worker) 
+        self.active_workers[url] = worker
         worker.start()
         
         self.save_history_from_table()
@@ -385,3 +407,62 @@ class MainWindow(QMainWindow):
             if checkbox.isChecked():
                 self.settings.setValue("close_behavior", "exit")
             self.force_exit()
+
+    def show_context_menu(self, position):
+        """Builds the right-click menu based on where the user clicked."""
+        item = self.table.itemAt(position)
+        if not item:
+            return
+            
+        row = item.row()
+        current_status = self.table.item(row, 1).text()
+        
+        menu = QMenu()
+        
+        # Only show Pause/Resume if it's not already finished or errored
+        if current_status == "Paused":
+            resume_action = menu.addAction("Resume Download")
+            resume_action.triggered.connect(lambda: self.resume_download(row))
+        elif "%" in current_status or current_status == "Starting...":
+            pause_action = menu.addAction("Pause Download")
+            pause_action.triggered.connect(lambda: self.pause_download(row))
+            
+        menu.addSeparator()
+        
+        # Let's move your delete button logic into the right click menu too!
+        delete_action = menu.addAction("Remove Selected")
+        delete_action.triggered.connect(self.remove_selected_item)
+        
+        menu.exec(self.table.viewport().mapToGlobal(position))
+
+    def pause_download(self, row):
+        """Kills the worker and updates the UI to 'Paused'."""
+        hidden_data = self.table.item(row, 0).data(Qt.UserRole)
+        url = hidden_data["url"]
+        
+        # Find the specific background worker and kill it
+        worker = self.active_workers.get(url)
+        if worker:
+            worker.stop()
+            
+        self.table.item(row, 1).setText("Paused")
+        self.table.item(row, 2).setText("-") # Clear seeders
+        self.save_history_from_table()
+
+    def resume_download(self, row):
+        """Creates a brand new worker to pick up where aria2c left off."""
+        hidden_data = self.table.item(row, 0).data(Qt.UserRole)
+        url = hidden_data["url"]
+        folder_path = hidden_data["folder_path"]
+        
+        self.table.item(row, 1).setText("Starting...")
+        
+        # Spawn a brand new worker for this row
+        worker = DownloadWorker(row, url, folder_path)
+        worker.progress_signal.connect(self.on_progress_update)
+        worker.finished_signal.connect(self.on_download_finished)
+        
+        self.active_workers[url] = worker
+        worker.start()
+        
+        self.save_history_from_table()

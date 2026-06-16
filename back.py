@@ -15,17 +15,16 @@ headers = {
 }
 
 
-def download_file(link, folder_path, progress_callback=None):
+def download_file(link, folder_path, progress_callback=None, process_callback=None):
     if not link:
-
         print("Error: Please provide a link")
         return
-
 
     link = link.strip()
 
     if link.startswith("magnet:?"):
-        return _download_magnet(link, folder_path, progress_callback)
+        # Pass the new callback down to the magnet function
+        return _download_magnet(link, folder_path, progress_callback, process_callback)
     elif link.startswith("http://") or link.startswith("https://"):
         return _download_direct(link, folder_path, progress_callback)
     else:
@@ -55,14 +54,11 @@ def _download_direct(url, folder_path, progress_callback):
         return False, f"HTTP Network error: {e}"
 
 
-def _download_magnet(magnet_link, folder_path, progress_callback):
+def _download_magnet(magnet_link, folder_path, progress_callback, process_callback=None):
     try:
         if progress_callback:
             progress_callback("Initializing aria2c for magnet link...")
 
-        # Command to run aria2c
-        # --dir: sets the output directory
-        # --seed-time=0: ensures it stops immediately after the download finishes
         cmd = [
             ARIA2_EXECUTABLE,
             "--dir", folder_path,
@@ -70,7 +66,6 @@ def _download_magnet(magnet_link, folder_path, progress_callback):
             magnet_link
         ]
 
-        # Launch the aria2 process
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -80,16 +75,19 @@ def _download_magnet(magnet_link, folder_path, progress_callback):
             creationflags=subprocess.CREATE_NO_WINDOW
         )
 
-        # Capture the output line by line and send it to the GUI progress callback
+        # --- NEW BRIDGE: Send the process object back to the GUI! ---
+        if process_callback:
+            process_callback(process)
+        # ------------------------------------------------------------
+
         for line in process.stdout:
             line = line.strip()
             if line and progress_callback:
-                # Send the terminal output directly to your GUI
                 progress_callback(f"[aria2] {line}")
 
-        # Wait for the process to finish
         process.wait()
 
+        
         if process.returncode == 0:
             if progress_callback:
                 progress_callback("Cleaning up .srt files...")
