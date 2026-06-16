@@ -5,6 +5,9 @@ import json
 import cloudscraper
 import subprocess
 import glob
+import winreg
+import mimetypes
+from urllib.parse import urlparse, unquote
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ARIA2_EXECUTABLE = os.path.join(BASE_DIR, "venv", "Scripts", "aria2c.exe")
@@ -15,7 +18,7 @@ headers = {
 }
 
 
-def download_file(link, folder_path, progress_callback=None, process_callback=None):
+def download_file(link, folder_path, progress_callback=None, process_callback=None, speed_limit=0):
     if not link:
         print("Error: Please provide a link")
         return
@@ -23,38 +26,70 @@ def download_file(link, folder_path, progress_callback=None, process_callback=No
     link = link.strip()
 
     if link.startswith("magnet:?"):
-        # Pass the new callback down to the magnet function
-        return _download_magnet(link, folder_path, progress_callback, process_callback)
+        # Pass the limit down to the magnet handler
+        return _download_magnet(link, folder_path, progress_callback, process_callback, speed_limit)
     elif link.startswith("http://") or link.startswith("https://"):
         return _download_direct(link, folder_path, progress_callback)
     else:
-        return False, "Error: Invalid link. Must start with http, https, or magnet:?"
+        return False, "Error: Invalid link."
 
 
 
 def _download_direct(url, folder_path, progress_callback):
-    match = re.search(r'/([^/]+\.(jpg|jpeg|png|gif|txt|mp4|zip|rar|exe))$', url, re.IGNORECASE)
-    filename = match.group(1) if match else "downloaded_file"
-    final_save_path = os.path.join(folder_path, filename)
-
     scraper = cloudscraper.create_scraper()
     
     try:
         if progress_callback:
             progress_callback("Connecting to server...")
             
-        r = scraper.get(url, headers=headers)
-        if r.status_code == 200:
-            with open(final_save_path, "wb") as file:
-                file.write(r.content)
-            return True, f"Success! File saved to:\n{final_save_path}"
-        else:
-            return False, f"Failed HTTP. Status code: {r.status_code}"
+        # stream=True lets us read the headers BEFORE downloading the heavy data
+        with scraper.get(url, headers=headers, stream=True) as r:
+            if r.status_code == 200:
+                
+                # --- SMART NAMING SYSTEM ---
+                filename = None
+                
+                # 1. Check if the server explicitly tells us the exact file name
+                cd = r.headers.get('content-disposition')
+                if cd:
+                    match = re.search(r'filename\*?=(?:UTF-8\'\')?([^;]+)', cd, re.IGNORECASE)
+                    if match:
+                        filename = unquote(match.group(1).strip('"\''))
+                
+                # 2. Fallback: Try to rip the name from the end of the URL
+                if not filename:
+                    parsed_url = urlparse(url)
+                    filename = unquote(os.path.basename(parsed_url.path))
+                
+                # 3. Last Resort: Use a default name
+                if not filename:
+                    filename = "downloaded_file"
+                    
+                # 4. If the file has no extension (like your HTML example), guess it!
+                if "." not in filename:
+                    content_type = r.headers.get('content-type', '').split(';')[0]
+                    ext = mimetypes.guess_extension(content_type)
+                    if ext:
+                        if ext == '.htm': ext = '.html' # Quick fix for older mimetypes
+                        filename += ext
+                # ----------------------------
+
+                final_save_path = os.path.join(folder_path, filename)
+
+                # Write the file in 8KB chunks so it doesn't crash your RAM
+                with open(final_save_path, "wb") as file:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            file.write(chunk)
+                            
+                return True, f"Success! File saved to:\n{final_save_path}"
+            else:
+                return False, f"Failed HTTP. Status code: {r.status_code}"
     except Exception as e:
         return False, f"HTTP Network error: {e}"
 
 
-def _download_magnet(magnet_link, folder_path, progress_callback, process_callback=None):
+def _download_magnet(magnet_link, folder_path, progress_callback, process_callback=None, speed_limit=0):
     try:
         if progress_callback:
             progress_callback("Initializing aria2c for magnet link...")
@@ -62,9 +97,14 @@ def _download_magnet(magnet_link, folder_path, progress_callback, process_callba
         cmd = [
             ARIA2_EXECUTABLE,
             "--dir", folder_path,
-            "--seed-time=0",
-            magnet_link
+            "--seed-time=0"
         ]
+
+        if speed_limit > 0:
+            cmd.append(f"--max-overall-download-limit={speed_limit}K")
+
+        # The link must always be the very last argument!
+        cmd.append(magnet_link)
 
         process = subprocess.Popen(
             cmd,
@@ -152,5 +192,46 @@ def get_resource_path(relative_path):
     
     return os.path.join(base_path, relative_path)
 
+
+def is_default_magnet_handler():
+    """Checks if SnowPrism is currently set as the default in the registry."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\magnet\shell\open\command")
+        value, _ = winreg.QueryValueEx(key, "")
+        winreg.CloseKey(key)
+        return sys.executable in value
+    except FileNotFoundError:
+        return False
+
+def fix_magnet_registry():
+    """Rewrites the registry to point to the current executable."""
+    try:
+        winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\magnet\shell\open\command")
+        
+        key_base = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\magnet", 0, winreg.KEY_WRITE)
+        winreg.SetValueEx(key_base, "", 0, winreg.REG_SZ, "URL:magnet protocol")
+        winreg.SetValueEx(key_base, "URL Protocol", 0, winreg.REG_SZ, "")
+        winreg.CloseKey(key_base)
+
+        key_cmd = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\magnet\shell\open\command", 0, winreg.KEY_WRITE)
+        command_string = f'"{sys.executable}" "%1"'
+        winreg.SetValueEx(key_cmd, "", 0, winreg.REG_SZ, command_string)
+        winreg.CloseKey(key_cmd)
+        return True
+    except Exception as e:
+        print(f"Registry write failed: {e}")
+        return False
+
+def remove_magnet_registry():
+    """Safely removes the SnowPrism magnet protocol association."""
+    try:
+        # Deleting the command key breaks the link, returning it to default Windows behavior
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\magnet\shell\open\command")
+        return True
+    except FileNotFoundError:
+        return True # Already gone
+    except Exception as e:
+        print(f"Registry delete failed: {e}")
+        return False
 
 ARIA2_EXECUTABLE = get_resource_path("aria2c.exe")

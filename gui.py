@@ -7,7 +7,7 @@ from urllib.parse import unquote
 from PySide6.QtWidgets import (QLineEdit, QPushButton,
                                QVBoxLayout, QHBoxLayout, QDialog, QFileDialog, 
                                QMainWindow, QWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-                                 QMessageBox, QCheckBox, QMenu, QSystemTrayIcon)
+                                 QMessageBox, QCheckBox, QMenu, QSystemTrayIcon, QLabel, QSpinBox)
 from PySide6.QtCore import Qt, QThread, Signal, QSettings
 from PySide6.QtGui import QAction, QIcon
 from back import *
@@ -26,20 +26,22 @@ class DownloadWorker(QThread):
     progress_signal = Signal(int, str) 
     finished_signal = Signal(int, bool, str) 
 
-    def __init__(self, row, url, folder_path):
-        super().__init__()
-        self.row = row
-        self.url = url
-        self.folder_path = folder_path
-        self.is_paused = False 
-        self.process = None # <-- Initialize the variable safely
+    def __init__(self, row, url, folder_path, speed_limit=0):
+            super().__init__()
+            self.row = row
+            self.url = url
+            self.folder_path = folder_path
+            self.speed_limit = speed_limit # Save it
+            self.is_paused = False 
+            self.process = None
 
     def run(self):
         success, message = download_file(
             self.url, 
             self.folder_path, 
             progress_callback=self.safe_progress_emit,
-            process_callback=self.set_process
+            process_callback=self.set_process,
+            speed_limit=self.speed_limit # Hand it to back.py!
         )
         
         if not self.is_paused:
@@ -60,11 +62,71 @@ class DownloadWorker(QThread):
         if self.process:
             self.process.kill()
 
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super(SettingsDialog, self).__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setFixedSize(350, 200)
+
+        # Access our saved settings
+        self.settings = QSettings("SnowPrismApp", "SnowPrism")
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(25, 25, 25, 25)
+
+        # --- Checkbox (Registry) ---
+        self.magnet_checkbox = QCheckBox("Set as default magnet handler")
+        self.magnet_checkbox.setChecked(is_default_magnet_handler())
+        self.magnet_checkbox.toggled.connect(self.toggle_magnet_handler)
+        
+        # --- NEW: Speed Limit Controls ---
+        speed_layout = QHBoxLayout()
+        speed_label = QLabel("Max Speed (KB/s):")
+        
+        self.speed_spinbox = QSpinBox()
+        self.speed_spinbox.setRange(0, 999999) 
+        self.speed_spinbox.setSpecialValueText("Unlimited") # 0 = Unlimited
+        
+        # Load the saved speed (default to 0)
+        saved_speed = self.settings.value("max_speed", 0, type=int)
+        self.speed_spinbox.setValue(saved_speed)
+        
+        self.speed_spinbox.valueChanged.connect(self.save_speed)
+
+        speed_layout.addWidget(speed_label)
+        speed_layout.addWidget(self.speed_spinbox)
+        # --------------------------------
+
+        layout.addWidget(self.magnet_checkbox)
+        layout.addLayout(speed_layout)
+        layout.addStretch()
+        self.setLayout(layout)
+
+
+    def toggle_magnet_handler(self, checked):
+        if checked:
+            success = fix_magnet_registry()
+            if not success:
+                QMessageBox.warning(self, "Error", "Failed to set registry.")
+                self.magnet_checkbox.setChecked(False) # Revert visually if it failed
+        else:
+            success = remove_magnet_registry()
+            if not success:
+                QMessageBox.warning(self, "Error", "Failed to remove registry.")
+                self.magnet_checkbox.setChecked(True) # Revert visually if it failed
+
+    def save_speed(self, value):
+        """Instantly saves the new speed to the Windows Registry when changed."""
+        self.settings.setValue("max_speed", value)
+
 class DownloadDialog(QDialog):
     download_requested = Signal(str, str) 
 
     def __init__(self, parent=None):
         super(DownloadDialog, self).__init__(parent)
+
+
+        
         self.setWindowTitle("New Download")
         self.setFixedSize(500, 150)
 
@@ -132,9 +194,13 @@ class MainWindow(QMainWindow):
         
         self.remove_item_btn = QPushButton("Remove Selected")
         self.remove_item_btn.setFixedSize(200, 40)
+
+        self.settings_btn = QPushButton("⚙ Settings")
+        self.settings_btn.setFixedSize(120, 40)
         
         button_layout.addWidget(self.open_downloader_btn)
         button_layout.addWidget(self.remove_item_btn)
+        button_layout.addWidget(self.settings_btn)
         button_layout.setAlignment(Qt.AlignCenter)
 
         self.table = QTableWidget(0, 3) 
@@ -156,6 +222,7 @@ class MainWindow(QMainWindow):
 
         self.open_downloader_btn.clicked.connect(self.open_downloader)
         self.remove_item_btn.clicked.connect(self.remove_selected_item)
+        self.settings_btn.clicked.connect(self.open_settings)
         
         self.downloader_dialog = None
         self.active_workers = {}
@@ -167,6 +234,10 @@ class MainWindow(QMainWindow):
 
         self.setup_system_tray()
 
+
+    def open_settings(self):
+            dialog = SettingsDialog(self)
+            dialog.exec()
 
     def setup_system_tray(self):
         """Creates the system tray icon and its right-click context menu."""
@@ -317,7 +388,9 @@ class MainWindow(QMainWindow):
         self.table.setItem(current_row, 1, progress_item)
         self.table.setItem(current_row, 2, seeder_item)
 
-        worker = DownloadWorker(current_row, url, folder_path)
+        speed_limit = self.settings.value("max_speed", 0, type=int)
+        worker = DownloadWorker(current_row, url, folder_path, speed_limit)
+
         worker.progress_signal.connect(self.on_progress_update)
         worker.finished_signal.connect(self.on_download_finished)
         

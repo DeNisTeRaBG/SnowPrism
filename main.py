@@ -4,7 +4,7 @@ import winreg
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 from gui import MainWindow
-from back import get_resource_path
+from back import get_resource_path, is_default_magnet_handler, fix_magnet_registry
 
 
 
