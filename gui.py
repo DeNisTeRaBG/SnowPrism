@@ -101,9 +101,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("SnowPrism Download Manager")
         self.resize(700, 500)
 
-        # --- NEW: Initialize QSettings to remember the close behavior ---
         self.settings = QSettings("SnowPrismApp", "SnowPrism")
-        # ----------------------------------------------------------------
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -120,11 +118,14 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.remove_item_btn)
         button_layout.setAlignment(Qt.AlignCenter)
 
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["File Name", "Progress"])
+        self.table = QTableWidget(0, 3) 
+        self.table.setHorizontalHeaderLabels(["File Name", "Progress", "Seeders"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows) 
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.cellDoubleClicked.connect(self.open_download_directory)
 
         layout = QVBoxLayout(central_widget)
@@ -180,19 +181,28 @@ class MainWindow(QMainWindow):
 
 
     def remove_selected_item(self):
-        current_row = self.table.currentRow()
+        # Get all currently selected items in the table
+        selected_items = self.table.selectedItems()
         
-        if current_row < 0:
+        if not selected_items:
             return
+            
+        # Extract the unique row numbers (since 1 row has multiple items/columns)
+        rows_to_delete = set()
+        for item in selected_items:
+            rows_to_delete.add(item.row())
             
         confirm = QMessageBox.question(
             self, "Confirm Removal", 
-            "Remove this item from your download history? (The downloaded files will NOT be deleted)",
+            f"Remove {len(rows_to_delete)} item(s) from your download history?\n(The downloaded files will NOT be deleted)",
             QMessageBox.Yes | QMessageBox.No
         )
         
         if confirm == QMessageBox.Yes:
-            self.table.removeRow(current_row)
+            # IMPORTANT: Sort in reverse! Delete from the bottom up so indices don't shift.
+            for row in sorted(list(rows_to_delete), reverse=True):
+                self.table.removeRow(row)
+                
             self.save_history_from_table()
 
     def load_history_to_table(self):
@@ -211,8 +221,12 @@ class MainWindow(QMainWindow):
             progress_item = QTableWidgetItem(item["progress"])
             progress_item.setTextAlignment(Qt.AlignCenter)
 
+            seeder_item = QTableWidgetItem("-")
+            seeder_item.setTextAlignment(Qt.AlignCenter)
+
             self.table.setItem(current_row, 0, name_item)
             self.table.setItem(current_row, 1, progress_item)
+            self.table.setItem(current_row, 2, seeder_item)
 
             self.last_save_path = item["folder_path"]
 
@@ -274,8 +288,12 @@ class MainWindow(QMainWindow):
         progress_item = QTableWidgetItem("Starting...")
         progress_item.setTextAlignment(Qt.AlignCenter)
 
+        seeder_item = QTableWidgetItem("-")
+        seeder_item.setTextAlignment(Qt.AlignCenter)
+
         self.table.setItem(current_row, 0, name_item)
         self.table.setItem(current_row, 1, progress_item)
+        self.table.setItem(current_row, 2, seeder_item)
 
         worker = DownloadWorker(current_row, url, folder_path)
         worker.progress_signal.connect(self.on_progress_update)
@@ -287,13 +305,23 @@ class MainWindow(QMainWindow):
         self.save_history_from_table()
 
     def on_progress_update(self, row, current_status):
+        # 1. Update the Percentage
         match = re.search(r'\((\d+)%\)', current_status)
-
         if match:
             percent_val = match.group(1)
-
             if percent_val != "100":
-                    self.table.item(row, 1).setText(f"{percent_val}%")
+                # Safety check in case the row was deleted while downloading
+                item = self.table.item(row, 1)
+                if item:
+                    item.setText(f"{percent_val}%")
+
+        # 2. Update the Seeders
+        seeder_match = re.search(r'SD:(\d+)', current_status)
+        if seeder_match:
+            seeders_val = seeder_match.group(1)
+            item = self.table.item(row, 2)
+            if item:
+                item.setText(seeders_val)
 
     def on_download_finished(self, row, success, message):
         if success:
