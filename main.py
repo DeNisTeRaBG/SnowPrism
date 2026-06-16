@@ -81,6 +81,8 @@ if __name__ == '__main__':
 
     app = QApplication(sys.argv)
 
+    app.setQuitOnLastWindowClosed(False)
+
     app.setApplicationName("SnowPrism")
     app.setOrganizationName("DenisteraBG")
 
@@ -88,6 +90,7 @@ if __name__ == '__main__':
     app.setWindowIcon(QIcon(icon_path))
 
     main_window = MainWindow()
+    
     if len(sys.argv) > 1:
         passed_link = sys.argv[1].strip('"').strip("'")
         

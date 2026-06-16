@@ -6,9 +6,11 @@ import subprocess
 from urllib.parse import unquote
 from PySide6.QtWidgets import (QLineEdit, QPushButton,
                                QVBoxLayout, QHBoxLayout, QDialog, QFileDialog, 
-                               QMainWindow, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox)
-from PySide6.QtCore import Qt, QThread, Signal
-from back import HistoryManager, download_file
+                               QMainWindow, QWidget, QTableWidget, QTableWidgetItem, QHeaderView,
+                                 QMessageBox, QCheckBox, QMenu, QSystemTrayIcon)
+from PySide6.QtCore import Qt, QThread, Signal, QSettings
+from PySide6.QtGui import QAction, QIcon
+from back import *
 
 def get_display_name(url):
     if url.startswith("magnet:"):
@@ -99,6 +101,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("SnowPrism Download Manager")
         self.resize(700, 500)
 
+        # --- NEW: Initialize QSettings to remember the close behavior ---
+        self.settings = QSettings("SnowPrismApp", "SnowPrism")
+        # ----------------------------------------------------------------
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
@@ -118,7 +124,7 @@ class MainWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(["File Name", "Progress"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows) # Select whole rows at once
+        self.table.setSelectionBehavior(QTableWidget.SelectRows) 
         self.table.cellDoubleClicked.connect(self.open_download_directory)
 
         layout = QVBoxLayout(central_widget)
@@ -136,8 +142,44 @@ class MainWindow(QMainWindow):
         self.history_manager = HistoryManager()
         self.load_history_to_table()
 
+        self.setup_system_tray()
+
+
+    def setup_system_tray(self):
+        """Creates the system tray icon and its right-click context menu."""
+        self.tray_icon = QSystemTrayIcon(self)
+        
+        icon_path = get_resource_path("app_icon.ico")
+        self.tray_icon.setIcon(QIcon(icon_path))
+        
+        tray_menu = QMenu(self)
+        
+        open_action = QAction("Open SnowPrism", self)
+        open_action.triggered.connect(self.showNormal) 
+        
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.force_exit) 
+        
+        tray_menu.addAction(open_action)
+        tray_menu.addSeparator()
+        tray_menu.addAction(exit_action)
+        
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.on_tray_icon_activated)
+        self.tray_icon.show()
+
+    def on_tray_icon_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.showNormal()
+            self.activateWindow()
+
+    def force_exit(self):
+        """Bypasses the close confirmation and shuts down completely."""
+        self.tray_icon.hide() 
+        sys.exit(0)
+
+
     def remove_selected_item(self):
-        """Deletes the currently selected row and updates the JSON file."""
         current_row = self.table.currentRow()
         
         if current_row < 0:
@@ -152,8 +194,6 @@ class MainWindow(QMainWindow):
         if confirm == QMessageBox.Yes:
             self.table.removeRow(current_row)
             self.save_history_from_table()
-
-
 
     def load_history_to_table(self):
         history_data = self.history_manager.load()
@@ -177,16 +217,12 @@ class MainWindow(QMainWindow):
             self.last_save_path = item["folder_path"]
 
     def save_history_from_table(self):
-        
-
-
         history_data = []
         for row in range(self.table.rowCount()):
             name_item = self.table.item(row, 0)
             progress_item = self.table.item(row, 1)
 
             if name_item and progress_item:
-                # Retrieve our hidden dictionary
                 hidden_data = name_item.data(Qt.UserRole)
                 
                 history_data.append({
@@ -223,7 +259,6 @@ class MainWindow(QMainWindow):
                     
                     if reply == QMessageBox.No:
                         return
-
 
         self.last_save_path = folder_path 
         
@@ -284,11 +319,41 @@ class MainWindow(QMainWindow):
         else:
             subprocess.Popen(["xdg-open", folder_path])
 
-    def closeEvent(self, event):
-        self.save_history_from_table()
-        event.accept()
-
     def open_downloader_with_link(self, url):
-            """Opens the downloader dialog and pre-fills the URL."""
-            self.open_downloader()
-            self.downloader_dialog.url_edit.setText(url)
+        self.open_downloader()
+        self.downloader_dialog.url_edit.setText(url)
+
+    def closeEvent(self, event):
+        """Overrides the standard Windows 'X' close button behavior."""
+        self.save_history_from_table() # Always save history first!
+        
+        saved_preference = self.settings.value("close_behavior", "")
+        
+        if saved_preference == "exit":
+            self.force_exit()
+        elif saved_preference == "tray":
+            self.hide() 
+            event.ignore()
+            return
+
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Close SnowPrism")
+        msg_box.setText("What would you like to do?")
+        
+        tray_button = msg_box.addButton("Run in Background", QMessageBox.ButtonRole.ActionRole)
+        exit_button = msg_box.addButton("Exit Program", QMessageBox.ButtonRole.RejectRole)
+        
+        checkbox = QCheckBox("Remember my choice")
+        msg_box.setCheckBox(checkbox)
+        
+        msg_box.exec()
+        
+        if msg_box.clickedButton() == tray_button:
+            if checkbox.isChecked():
+                self.settings.setValue("close_behavior", "tray")
+            self.hide() 
+            event.ignore() 
+        else:
+            if checkbox.isChecked():
+                self.settings.setValue("close_behavior", "exit")
+            self.force_exit()
